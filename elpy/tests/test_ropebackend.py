@@ -1,10 +1,13 @@
 """Tests for elpy.ropebackend."""
 
 import os
+import shutil
+import tempfile
 
 import mock
 
 from elpy import ropebackend
+from elpy import rpc
 from elpy.tests import compat
 from elpy.tests.support import BackendTestCase
 from elpy.tests.support import RPCGetCompletionsTests
@@ -44,6 +47,9 @@ class TestInit(RopeBackendTestCase):
         self.assertEqual([os.path.join(self.project_root, "foo.txt")],
                          actual)
 
+    def test_should_not_fail_for_inexisting_project_root(self):
+        ropebackend.RopeBackend("/does/not/exist/")
+
 
 class TestValidate(RopeBackendTestCase):
     def test_should_call_validate_after_timeout(self):
@@ -65,6 +71,15 @@ class TestValidate(RopeBackendTestCase):
                 self.backend.validate()
 
                 self.assertFalse(project.validate.called)
+
+    def test_should_not_fail_if_root_vanishes(self):
+        # Bug #353
+        tmpdir = tempfile.mkdtemp(prefix="elpy-test-validate-")
+        try:
+            backend = ropebackend.RopeBackend(tmpdir)
+        finally:
+            shutil.rmtree(tmpdir)
+        backend.validate()
 
 
 class TestRPCGetCompletions(RPCGetCompletionsTests,
@@ -145,3 +160,33 @@ class TestPatchProjectFiles(RopeBackendTestCase):
                      for resource
                      in self.backend.project.get_files())
         self.assertEqual(expected, actual)
+
+
+class TestCallRope(RopeBackendTestCase):
+    def test_should_return_value(self):
+        func = mock.MagicMock()
+        func.return_value = 23
+
+        actual = self.backend.call_rope(
+            func, "foo.py", "", 0
+        )
+
+        self.assertEqual(23, actual)
+
+    def test_should_raise_fault_with_data_on_exception(self):
+        func = mock.MagicMock()
+        func.side_effect = RuntimeError("Stuff!")
+        func.__module__ = "rope.test"
+        func.__name__ = "test_function"
+
+        try:
+            self.backend.call_rope(
+                func, "foo.py", "", 0
+            )
+        except rpc.Fault as e:
+            self.assertEqual(500, e.code)
+            self.assertEqual("Stuff!", e.message)
+            self.assertIn("traceback", e.data)
+            self.assertIn("rope_debug_info", e.data)
+            self.assertEqual("rope.test.test_function",
+                             e.data["rope_debug_info"]["function_name"])

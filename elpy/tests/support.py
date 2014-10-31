@@ -1,3 +1,5 @@
+# coding: utf-8
+
 """Support classes and functions for the elpy test code.
 
 Elpy uses a bit of a peculiar test setup to avoid redundancy. For the
@@ -103,10 +105,20 @@ class GenericRPCTests(object):
         self.rpc(filename, source, offset)
 
     def test_should_not_fail_for_bad_indentation(self):
+        # Bug in Rope: rope#80
         source, offset = source_and_offset(
             "def foo():\n"
-            "       print 23_|_\n"
-            "      print 17\n")
+            "       print(23)_|_\n"
+            "      print(17)\n")
+        filename = self.project_file("test.py", source)
+
+        self.rpc(filename, source, offset)
+
+    def test_should_not_fail_for_relative_import(self):
+        # Bug in Rope: rope#81 and rope#82
+        source, offset = source_and_offset(
+            "from .. import foo_|_"
+        )
         filename = self.project_file("test.py", source)
 
         self.rpc(filename, source, offset)
@@ -122,10 +134,13 @@ class GenericRPCTests(object):
         self.rpc(filename, source, offset)
 
     def test_should_not_fail_with_bad_encoding(self):
-        source = u'# coding: utf-8X\n'
+        # Bug in Rope: rope#83
+        source, offset = source_and_offset(
+            u'# coding: utf-8X_|_\n'
+        )
         filename = self.project_file("test.py", source)
 
-        self.rpc(filename, source, 16)
+        self.rpc(filename, source, offset)
 
     def test_should_not_fail_with_form_feed_characters(self):
         # Bug in Jedi: jedi#424
@@ -201,6 +216,78 @@ x._|_
         filename = self.project_file("project.py", source)
 
         self.rpc(filename, source, offset)
+
+    def test_should_not_fail_on_literals(self):
+        # Bug #314, #344 / jedi#466
+        source = u'lit = u"""\\\n# -*- coding: utf-8 -*-\n"""\n'
+        offset = 0
+        filename = self.project_file("project.py", source)
+
+        self.rpc(filename, source, offset)
+
+    def test_should_not_fail_with_args_as_args(self):
+        # Bug #347 in rope_py3k
+        source, offset = source_and_offset(
+            "def my_function(*args):\n"
+            "    ret_|_"
+        )
+        filename = self.project_file("project.py", source)
+
+        self.rpc(filename, source, offset)
+
+    def test_should_not_fail_for_unicode_chars_in_string(self):
+        # Bug #358 / jedi#482
+        source = '''\
+# coding: utf-8
+
+logging.info(u"Saving «{}»...".format(title))
+requests.get(u"https://web.archive.org/save/{}".format(url))
+'''
+        offset = 57
+        filename = self.project_file("project.py", source)
+
+        self.rpc(filename, source, offset)
+
+    def test_should_not_fail_for_bad_escape_sequence(self):
+        # Bug #360 / jedi#485
+        source = r"v = '\x'"
+        offset = 8
+        filename = self.project_file("project.py", source)
+
+        self.rpc(filename, source, offset)
+
+    def test_should_not_fail_for_coding_declarations_in_strings(self):
+        # Bug #314 / jedi#465 / python#22221
+        source = u'lit = """\\\n# -*- coding: utf-8 -*-\n"""'
+        offset = 8
+        filename = self.project_file("project.py", source)
+
+        self.rpc(filename, source, offset)
+
+    def test_should_not_fail_if_root_vanishes(self):
+        # Bug #353
+        source, offset = source_and_offset(
+            "import foo\n"
+            "foo._|_"
+        )
+        filename = self.project_file("project.py", source)
+        shutil.rmtree(self.project_root)
+
+        self.rpc(filename, source, offset)
+
+    # For some reason, this breaks a lot of other tests. Couldn't
+    # figure out why.
+    #
+    # def test_should_not_fail_for_sys_path(self):
+    #     # Bug #365 / jedi#486
+    #     source, offset = source_and_offset(
+    #         "import sys\n"
+    #         "\n"
+    #         "sys.path.index(_|_\n"
+    #     )
+    #     filename = self.project_file("project.py", source)
+    #
+    #     self.rpc(filename, source, offset)
 
 
 class RPCGetCompletionsTests(GenericRPCTests):

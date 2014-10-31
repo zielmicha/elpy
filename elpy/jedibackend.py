@@ -134,7 +134,7 @@ class JediBackend(object):
         for use in uses:
             if use.module_path == filename:
                 offset = linecol_to_pos(source, use.line, use.column)
-            else:
+            elif use.module_path is not None:
                 with open(use.module_path) as f:
                     text = f.read()
                 offset = linecol_to_pos(text, use.line, use.column)
@@ -215,6 +215,57 @@ def run_with_debug(jedi, name, *args, **kwargs):
         # Bug in Python 2.6, see #275
         if isinstance(e, OSError) and e.errno == 13:
             return None
+        # Bug jedi#466
+        if (
+                isinstance(e, SyntaxError) and
+                "EOL while scanning string literal" in str(e)
+        ):
+            return None
+        # Bug jedi#482
+        if isinstance(e, UnicodeEncodeError):
+            return None
+        # Bug jedi#485
+        if (
+                isinstance(e, ValueError) and
+                "invalid \\x escape" in str(e)
+        ):
+            return None
+        # Bug jedi#485 in Python 3
+        if (
+                isinstance(e, SyntaxError) and
+                "truncated \\xXX escape" in str(e)
+        ):
+            return None
+        # Bug jedi#465
+        if (
+                isinstance(e, SyntaxError) and
+                "encoding declaration in Unicode string" in str(e)
+        ):
+            return None
+        # Bug #337 / jedi#471
+        if (
+                isinstance(e, ImportError) and
+                "No module named" in str(e)
+        ):
+            return None
+        # Bug #365 / jedi#486 - fixed in Jedi 0.8.2
+        if (
+                isinstance(e, UnboundLocalError) and
+                "local variable 'path' referenced before assignment" in str(e)
+        ):
+            return None
+        # Bug #366 / jedi#491
+        if (
+                isinstance(e, ValueError) and
+                "__loader__ is None" in str(e)
+        ):
+            return None
+        # Bug #353
+        if (
+                isinstance(e, OSError) and
+                "No such file or directory" in str(e)
+        ):
+            return None
 
         from jedi import debug
 
@@ -227,7 +278,7 @@ def run_with_debug(jedi, name, *args, **kwargs):
                 prefix = "[W]"
             else:
                 prefix = "[?]"
-            debug_info.append("{0} {1}".format(prefix, str_out))
+            debug_info.append(u"{0} {1}".format(prefix, str_out))
 
         jedi.set_debug_function(_debug, speed=False)
         try:

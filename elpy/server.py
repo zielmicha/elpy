@@ -11,7 +11,6 @@ import pydoc
 
 from elpy.pydocutils import get_pydoc_completions
 from elpy.rpc import JSONRPCServer, Fault
-from elpy import compat
 
 try:
     from elpy import jedibackend
@@ -84,8 +83,13 @@ class ElpyRPCServer(JSONRPCServer):
         """Get a list of completion candidates for the symbol at offset.
 
         """
-        return self._call_backend("rpc_get_completions", [], filename,
-                                  get_source(source), offset)
+        results = self._call_backend("rpc_get_completions", [], filename,
+                                     get_source(source), offset)
+        # Uniquify by name
+        results = list(dict((res['name'], res) for res in results)
+                       .values())
+        results.sort(key=lambda cand: _pysymbol_key(cand["name"]))
+        return results
 
     def rpc_get_completion_docstring(self, completion):
         """Return documentation for a previously returned completion.
@@ -210,3 +214,18 @@ def get_source(fileobj):
                     os.remove(fileobj["filename"])
                 except:  # pragma: no cover
                     pass
+
+
+def _pysymbol_key(name):
+    """Return a sortable key index for name.
+
+    Sorting is case-insensitive, with the first underscore counting as
+    worse than any character, but subsequent underscores do not. This
+    means that dunder symbols (like __init__) are sorted after symbols
+    that start with an alphabetic character, but before those that
+    start with only a single underscore.
+
+    """
+    if name.startswith("_"):
+        name = "~" + name[1:]
+    return name.lower()

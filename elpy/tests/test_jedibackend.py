@@ -81,7 +81,13 @@ class TestRPCGetCalltip(RPCGetCalltipTests,
 
 class TestRPCGetUsages(RPCGetUsagesTests,
                        JediBackendTestCase):
-    pass
+    def test_should_not_fail_for_missing_module(self):
+        # This causes use.module_path to be None
+        source = "import sys\n\nsys.path.\n"  # insert()"
+        offset = 21
+        filename = self.project_file("project.py", source)
+
+        self.rpc(filename, source, offset)
 
 
 class TestPosToLinecol(unittest.TestCase):
@@ -158,6 +164,8 @@ class TestRunWithDebug(unittest.TestCase):
             self.assertEqual(jedi_debug_info["source"], None)
             self.assertEqual(jedi_debug_info["method"], "test_method")
             self.assertEqual(jedi_debug_info["debug_info"], [])
+        else:
+            self.fail("Fault not thrown")
 
     @mock.patch('jedi.Script')
     @mock.patch('jedi.set_debug_function')
@@ -169,6 +177,8 @@ class TestRunWithDebug(unittest.TestCase):
         except rpc.Fault as e:
             self.assertEqual(str(e), str(RuntimeError()))
             self.assertEqual(e.message, str(RuntimeError()))
+        else:
+            self.fail("Fault not thrown")
 
     @mock.patch('jedi.Script')
     @mock.patch('jedi.set_debug_function')
@@ -181,6 +191,8 @@ class TestRunWithDebug(unittest.TestCase):
             self.assertEqual(e.data["jedi_debug_info"]["script_args"],
                              "source=source")
             self.assertEqual(e.data["jedi_debug_info"]["source"], "foo")
+        else:
+            self.fail("Fault not thrown")
 
     @mock.patch('jedi.Script')
     @mock.patch('jedi.set_debug_function')
@@ -206,3 +218,20 @@ class TestRunWithDebug(unittest.TestCase):
                              ["[N] Notice",
                               "[W] Warning",
                               "[?] Other"])
+        else:
+            self.fail("Fault not thrown")
+
+    @mock.patch('jedi.set_debug_function')
+    @mock.patch('jedi.Script')
+    def test_should_not_fail_with_bad_data(self, Script, set_debug_function):
+        import jedi.debug
+
+        def set_debug(function, speed=True):
+            if function is not None:
+                function(jedi.debug.NOTICE, u"\xab")
+
+        set_debug_function.side_effect = set_debug
+        Script.return_value.test_method.side_effect = Exception
+
+        with self.assertRaises(rpc.Fault):
+            jedibackend.run_with_debug(jedi, 'test_method', 1, 2, arg=3)

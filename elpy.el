@@ -4,7 +4,7 @@
 
 ;; Author: Jorgen Schaefer <contact@jorgenschaefer.de>
 ;; URL: https://github.com/jorgenschaefer/elpy
-;; Version: 1.5.1
+;; Version: 1.6.0
 ;; Keywords: Python, IDE, Languages, Tools
 ;; Package-Requires: ((company "0.8.2") (find-file-in-project "3.3")  (highlight-indentation "0.5.0") (idomenu "0.1") (pyvenv "1.3") (yasnippet "0.8.0"))
 
@@ -80,7 +80,7 @@
 (require 'elpy-refactor)
 (require 'pyvenv)
 
-(defconst elpy-version "1.5.1"
+(defconst elpy-version "1.6.0"
   "The version of the Elpy lisp code.")
 
 ;;;;;;;;;;;;;;;;;;;;;;
@@ -164,12 +164,20 @@ can be inidividually enabled or disabled."
 (defcustom elpy-project-root nil
   "The root of the project the current buffer is in.
 
-The value is automatically set for new buffers using
-`elpy-project-root-finder-functions', which see.
+There is normally no use in setting this variable directly, as
+Elpy tries to detect the project root automatically. See
+`elpy-project-root-finder-functions' for a way of influencing
+this.
+
+Setting this variable globally will override Elpy's automatic
+project detection facilities entirely.
 
 Alternatively, you can set this in file- or directory-local
 variables using \\[add-file-local-variable] or
-\\[add-dir-local-variable]."
+\\[add-dir-local-variable].
+
+Do not use this variable in Emacs Lisp programs. Instead, call
+the `elpy-project-root' function. It will do the right thing."
   :type 'directory
   :safe 'file-directory-p
   :group 'elpy)
@@ -264,6 +272,19 @@ A setting of nil means to block indefinitely."
               (null val)))
   :group 'elpy)
 
+(defcustom elpy-rpc-error-timeout 30
+  "Minimum number of seconds between error popups.
+
+When Elpy encounters an error in the backend, it will display a
+lengthy description of the problem for a bug report. This hangs
+Emacs for a moment, and can be rather annoying if it happens
+repeatedly while editing a source file.
+
+If this variabl is non-nil, Elpy will not display the error
+message again within this amount of seconds."
+  :type 'integer
+  :group 'elpy)
+
 (defcustom elpy-test-runner 'elpy-test-discover-runner
   "The test runner to use to run tests."
   :type '(choice (const :tag "Unittest Discover" elpy-test-discover-runner)
@@ -305,10 +326,10 @@ A setting of nil means to block indefinitely."
     (define-key map (kbd "<S-return>") 'elpy-open-and-indent-line-below)
     (define-key map (kbd "<C-S-return>") 'elpy-open-and-indent-line-above)
 
-    (define-key map (kbd "<C-down>") 'elpy-nav-next-iblock)
-    (define-key map (kbd "<C-up>") 'elpy-nav-previous-iblock)
-    (define-key map (kbd "<C-left>") 'elpy-nav-backward-iblock)
-    (define-key map (kbd "<C-right>") 'elpy-nav-forward-iblock)
+    (define-key map (kbd "<C-down>") 'elpy-nav-forward-block)
+    (define-key map (kbd "<C-up>") 'elpy-nav-backward-block)
+    (define-key map (kbd "<C-left>") 'elpy-nav-backward-indent)
+    (define-key map (kbd "<C-right>") 'elpy-nav-forward-indent)
 
     (define-key map (kbd "<M-down>") 'elpy-nav-move-iblock-down)
     (define-key map (kbd "<M-up>") 'elpy-nav-move-iblock-up)
@@ -463,6 +484,27 @@ more structured list.
 
 (defvar elpy-config--get-config "import json
 import sys
+
+try:
+    import xmlrpclib
+except ImportError:
+    import xmlrpc.client as xmlrpclib
+
+from distutils.version import LooseVersion
+
+
+def latest(package, version=None):
+    try:
+        pypi = xmlrpclib.ServerProxy('https://pypi.python.org/pypi')
+        latest = pypi.package_releases(package)[0]
+        if version is None or LooseVersion(version) < LooseVersion(latest):
+            return latest
+        else:
+            return None
+    except:
+        return None
+
+
 config = {}
 config['python_version'] = ('{major}.{minor}.{micro}'
                             .format(major=sys.version_info[0],
@@ -481,14 +523,18 @@ try:
         config['jedi_version'] = '.'.join(str(x) for x in jedi.__version__)
     else:
         config['jedi_version'] = jedi.__version__
+    config['jedi_latest'] = latest('jedi', config['jedi_version'])
 except:
     config['jedi_version'] = None
+    config['jedi_latest'] = latest('jedi')
 
 try:
     import rope
     config['rope_version'] = rope.VERSION
+    config['rope_latest'] = latest('rope', config['rope_version'])
 except:
     config['rope_version'] = None
+    config['rope_latest'] = latest('rope')
 
 
 json.dump(config, sys.stdout)
@@ -534,6 +580,12 @@ a customize buffer, but has some more options."
         (goto-char (point-min))))
     (pop-to-buffer-same-window buf)))
 
+;;;###autoload
+(defun elpy-version ()
+  "Display the version of Elpy."
+  (interactive)
+  (message "Elpy %s (use M-x elpy-config for details)" elpy-version))
+
 (defun elpy-config--insert-help ()
   (let ((start (point)))
     ;; Help display from `customize-browse'
@@ -571,108 +623,144 @@ item in another window.\n\n")
   "Insert help text and widgets for configuration problems."
   (when (not config)
     (setq config (elpy-config--get-config)))
-  (elpy-config--insert-configuration-table config)
-  (insert "\n")
+  (let* ((python-version (gethash "python_version" config))
+         (rope-pypi-package  (if (and python-version
+                                      (string-match "^3\\." python-version))
+                                 "rope_py3k"
+                               "rope")))
 
-  ;; Python not found
-  (when (not (gethash "python_rpc_executable" config))
-    (elpy-insert--para
-     "Elpy can not find the configured Python interpreter. Please make "
-     "sure that the variable `elpy-rpc-python-command' points to a "
-     "command in your PATH. You can change the variable below.\n\n"))
-
-  ;; No virtual env
-  (when (and (gethash "python_rpc_executable" config)
-             (not (gethash "virtual_env" (elpy-config--get-config))))
-    (elpy-insert--para
-     "You have not activated a virtual env. While Elpy supports this, "
-     "it is often a good idea to work inside a virtual env. You can use "
-     "M-x pyvenv-activate or M-x pyvenv-workon to activate a virtual "
-     "env.\n\n"))
-
-  ;; Python found, but can't find the elpy module
-  (when (and (gethash "python_rpc_executable" config)
-             (not (gethash "elpy_version" config)))
-    (elpy-insert--para
-     "The Python interpreter could not find the elpy module. "
-     "Make sure the module is installed"
-     (if (getenv "virtual_env" config)
-         " in the current virtualenv.\n"
-       ".\n"))
+    (elpy-config--insert-configuration-table config)
     (insert "\n")
-    (widget-create 'elpy-insert--pip-button "elpy")
-    (insert "\n\n"))
 
-  ;; Otherwise unparseable output.
-  (when (gethash "error_output" config)
-    (elpy-insert--para
-     "There was an unexpected problem starting the RPC process. Please "
-     "check the following output to see if this makes sense to you. "
-     "To me, it doesn't.\n")
-    (insert "\n"
-            (gethash "error_output" config) "\n"
-            "\n"))
-
-  ;; Requested backend unavailable
-  (when (and (gethash "python_rpc_executable" config)
-             (or (and (equal elpy-rpc-backend "rope")
-                      (not (gethash "rope_version" config)))
-                 (and (equal elpy-rpc-backend "jedi")
-                      (not (gethash "jedi_version" config)))))
-    (elpy-insert--para
-     "You requested Elpy to use the backend " elpy-rpc-backend ", "
-     "but the Python interpreter could not load that module. Make "
-     "sure the module is installed, or change the value of "
-     "`elpy-rpc-backend' below to one of the available backends.\n")
-    (insert "\n")
-    (widget-create 'elpy-insert--pip-button elpy-rpc-backend)
-    (insert "\n\n"))
-
-  ;; Only native backend available, but requested automatic choice
-  (when (and (gethash "python_rpc_executable" config)
-             (and (not elpy-rpc-backend)
-                  (not (gethash "rope_version" config))
-                  (not (gethash "jedi_version" config))))
-    (elpy-insert--para
-     "You did not specify a preference for an RPC backend, but there "
-     "is only the native backend available. The native backend has "
-     "seriously limited capabilities. If you really want to use the "
-     "native backend, please change the value of `elpy-rpc-backend' "
-     "below to make this explicit. Alternatively, you can install the "
-     "module for one of the supported backends.\n")
-    (insert "\n")
-    (let ((python-version (gethash "python_version" config)))
-      (if (and python-version (string-match "^3\\." python-version))
-          (widget-create 'elpy-insert--pip-button "rope_py3k")
-        (widget-create 'elpy-insert--pip-button "rope")))
-    (insert "\n")
-    (widget-create 'elpy-insert--pip-button "jedi")
-    (insert "\n\n"))
-
-  ;; Bad backend version
-  (when (and (gethash "elpy_version" config)
-             (not (equal (gethash "elpy_version" config)
-                         elpy-version)))
-    (let ((elpy-python-version (gethash "elpy_version" config)))
+    ;; Python not found
+    (when (not (gethash "python_rpc_executable" config))
       (elpy-insert--para
-       "The Elpy backend is version " elpy-python-version " while "
-       "the Emacs package is " elpy-version ". This is incompatible. "
-       (if (version< elpy-python-version elpy-version)
-           "Please upgrade the Python module."
-         "Please upgrade the Emacs Lisp package.")
-       "\n")))
+       "Elpy can not find the configured Python interpreter. Please make "
+       "sure that the variable `elpy-rpc-python-command' points to a "
+       "command in your PATH. You can change the variable below.\n\n"))
 
-  ;; flake8, the default syntax checker, not found
-  (when (not (executable-find "flake8"))
-    (elpy-insert--para
-     "The configured syntax checker could not be found. Elpy uses this "
-     "program to provide syntax checks of your programs, so you might "
-     "want to install one. Elpy by default uses flake8.\n")
-    (insert "\n")
-    (widget-create 'elpy-insert--pip-button "flake8")
-    (insert "\n\n"))
+    ;; No virtual env
+    (when (and (gethash "python_rpc_executable" config)
+               (not (gethash "virtual_env" (elpy-config--get-config))))
+      (elpy-insert--para
+       "You have not activated a virtual env. While Elpy supports this, "
+       "it is often a good idea to work inside a virtual env. You can use "
+       "M-x pyvenv-activate or M-x pyvenv-workon to activate a virtual "
+       "env.\n\n"))
 
-  )
+    ;; No virtual env, but ~/.local/bin not in PATH
+    (when (and (not (memq system-type '(ms-dos windows-nt)))
+               (gethash "python_rpc_executable" config)
+               (not pyvenv-virtual-env)
+               (not (or (member (expand-file-name "~/.local/bin")
+                                exec-path)
+                        (member (expand-file-name "~/.local/bin/")
+                                exec-path))))
+      (elpy-insert--para
+       "The directory ~/.local/bin/ is not in your PATH, even though you "
+       "do not have an active virtualenv. Installing Python packages "
+       "locally will create executables in that directory, so Emacs "
+       "won't find them. If you are missing some commands, do add this "
+       "directory to your PATH.\n\n"))
+
+    ;; Python found, but can't find the elpy module
+    (when (and (gethash "python_rpc_executable" config)
+               (not (gethash "elpy_version" config)))
+      (elpy-insert--para
+       "The Python interpreter could not find the elpy module. "
+       "Make sure the module is installed"
+       (if (getenv "virtual_env" config)
+           " in the current virtualenv.\n"
+         ".\n"))
+      (insert "\n")
+      (widget-create 'elpy-insert--pip-button :package "elpy")
+      (insert "\n\n"))
+
+    ;; Bad backend version
+    (when (and (gethash "elpy_version" config)
+               (not (equal (gethash "elpy_version" config)
+                           elpy-version)))
+      (let ((elpy-python-version (gethash "elpy_version" config)))
+        (elpy-insert--para
+         "The Elpy backend is version " elpy-python-version " while "
+         "the Emacs package is " elpy-version ". This is incompatible. "
+         (if (version< elpy-python-version elpy-version)
+             "Please upgrade the Python module."
+           "Please upgrade the Emacs Lisp package.")
+         "\n")))
+
+    ;; Otherwise unparseable output.
+    (when (gethash "error_output" config)
+      (elpy-insert--para
+       "There was an unexpected problem starting the RPC process. Please "
+       "check the following output to see if this makes sense to you. "
+       "To me, it doesn't.\n")
+      (insert "\n"
+              (gethash "error_output" config) "\n"
+              "\n"))
+
+    ;; Requested backend unavailable
+    (when (and (gethash "python_rpc_executable" config)
+               (or (and (equal elpy-rpc-backend "rope")
+                        (not (gethash "rope_version" config)))
+                   (and (equal elpy-rpc-backend "jedi")
+                        (not (gethash "jedi_version" config)))))
+      (elpy-insert--para
+       "You requested Elpy to use the backend " elpy-rpc-backend ", "
+       "but the Python interpreter could not load that module. Make "
+       "sure the module is installed, or change the value of "
+       "`elpy-rpc-backend' below to one of the available backends.\n")
+      (insert "\n")
+      (widget-create 'elpy-insert--pip-button
+                     :package (if (equal elpy-rpc-backend "rope")
+                                  rope-pypi-package
+                                "jedi"))
+      (insert "\n\n"))
+
+    ;; No backend available.
+    (when (and (gethash "python_rpc_executable" config)
+               (and (not elpy-rpc-backend)
+                    (not (gethash "rope_version" config))
+                    (not (gethash "jedi_version" config))))
+      (elpy-insert--para
+       "There is no backend available. Please install either Rope or Jedi.\n")
+      (insert "\n")
+      (widget-create 'elpy-insert--pip-button :package rope-pypi-package)
+      (insert "\n")
+      (widget-create 'elpy-insert--pip-button :package "jedi")
+      (insert "\n\n"))
+
+    ;; Newer version of Rope available
+    (when (and (gethash "rope_version" config)
+               (gethash "rope_latest" config))
+      (elpy-insert--para
+       "There is a newer version of Rope available.\n")
+      (insert "\n")
+      (widget-create 'elpy-insert--pip-button
+                     :package rope-pypi-package :upgrade t)
+      (insert "\n\n"))
+
+    ;; Newer version of Jedi available
+    (when (and (gethash "jedi_version" config)
+               (gethash "jedi_latest" config))
+      (elpy-insert--para
+       "There is a newer version of Jedi available.\n")
+      (insert "\n")
+      (widget-create 'elpy-insert--pip-button
+                     :package "jedi" :upgrade t)
+      (insert "\n\n"))
+
+    ;; flake8, the default syntax checker, not found
+    (when (not (executable-find "flake8"))
+      (elpy-insert--para
+       "The configured syntax checker could not be found. Elpy uses this "
+       "program to provide syntax checks of your programs, so you might "
+       "want to install one. Elpy by default uses flake8.\n")
+      (insert "\n")
+      (widget-create 'elpy-insert--pip-button :package "flake8")
+      (insert "\n\n"))
+
+    ))
 
 (defun elpy-config--get-config ()
   "Return the configuration from `elpy-rpc-python-command'.
@@ -712,7 +800,8 @@ virtual_env_short"
           (puthash "virtual_env_short" (file-name-nondirectory venv) config)))
       (let ((return-value (ignore-errors
                             (let ((process-environment
-                                   (elpy-rpc--environment)))
+                                   (elpy-rpc--environment))
+                                  (default-directory "/"))
                               (call-process elpy-rpc-python-command
                                             nil
                                             (current-buffer)
@@ -743,7 +832,9 @@ virtual_env_short"
                                                 config))
         (elpy-python-version (gethash "elpy_version" config))
         (jedi-version (gethash "jedi_version" config))
+        (jedi-latest (gethash "jedi_latest" config))
         (rope-version (gethash "rope_version" config))
+        (rope-latest (gethash "rope_latest" config))
         (virtual-env (gethash "virtual_env" config))
         (virtual-env-short (gethash "virtual_env_short" config))
         table maxwidth)
@@ -786,12 +877,12 @@ virtual_env_short"
                         (t
                          (format "Not found (Python), %s (Emacs Lisp)"
                                  elpy-version))))
-            ("Jedi" . ,(if jedi-version
-                           jedi-version
-                         "Not found"))
-            ("Rope" . ,(if rope-version
-                           rope-version
-                         "Not found"))
+            ("Jedi" . ,(elpy-config--package-link "jedi"
+                                                  jedi-version
+                                                  jedi-latest))
+            ("Rope" . ,(elpy-config--package-link "rope"
+                                                  rope-version
+                                                  rope-latest))
             ("Syntax checker" . ,(let ((syntax-checker
                                         (executable-find
                                          python-check-command)))
@@ -814,6 +905,22 @@ virtual_env_short"
               ": "
               (cdr row)
               "\n"))))
+
+(defun elpy-config--package-link (name version latest)
+  "Return a string detailing a Python package.
+
+NAME is the PyPI name of the package. VERSION is the currently
+installed version. LATEST is the latest-available version on
+PyPI, or nil if that's VERSION."
+  (cond
+   ((and (not version) (not latest))
+    "Not found")
+   ((not latest)
+    version)
+   ((not version)
+    (format "Not found (%s available)" latest))
+   (t
+    (format "%s (%s available)" version latest))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Elpy Formatted Insertion
@@ -854,17 +961,24 @@ virtual_env_short"
 
 (defun elpy-insert--pip-button-value-create (widget)
   "The :value-create option for the pip button widget."
-  (let* ((python-module (widget-get widget :value))
+  (let* ((python-package (widget-get widget :package))
+         (do-upgrade (widget-get widget :upgrade))
+         (upgrade-option (if do-upgrade
+                             "--upgrade "
+                           ""))
          (do-user-install (not (or (getenv "VIRTUAL_ENV")
                                    pyvenv-virtual-env)))
          (user-option (if do-user-install
                           "--user "
                         ""))
+
          (command (cond
                    ((executable-find "pip")
-                    (format "pip install %s%s" user-option python-module))
+                    (format "pip install %s%s%s"
+                            user-option upgrade-option python-package))
                    ((executable-find "easy_install")
-                    (format "easy_install %s%s" user-option python-module))
+                    (format "easy_install %s%s"
+                            user-option python-package))
                    (t
                     (error "Neither easy_install nor pip found")))))
     (widget-put widget :command command)
@@ -1376,6 +1490,72 @@ with a prefix argument)."
       (with-selected-window (get-buffer-window buffer)
         (goto-char (1+ offset))))))
 
+(defun elpy-nav-forward-block ()
+  "Move to the next line indented like point.
+
+This will skip over lines and statements with different
+indentation levels."
+  (interactive)
+  (let ((indent (current-column))
+        (start (point)))
+    (when (/= (% indent python-indent-offset)
+              0)
+      (setq indent (* (1+ (/ indent python-indent-offset))
+                      python-indent-offset)))
+    (python-nav-forward-statement)
+    (while (and (< indent (current-indentation))
+                (not (eobp)))
+      (python-nav-forward-statement))
+    (when (< (current-indentation)
+             indent)
+      (goto-char start))))
+
+(defun elpy-nav-backward-block ()
+  "Move to the previous line indented like point.
+
+This will skip over lines and statements with different
+indentation levels."
+  (interactive)
+  (let ((indent (current-column))
+        (start (point)))
+    (when (/= (% indent python-indent-offset)
+              0)
+      (setq indent (* (1+ (/ indent python-indent-offset))
+                      python-indent-offset)))
+    (python-nav-backward-statement)
+    (while (and (< indent (current-indentation))
+                (not (bobp)))
+      (python-nav-backward-statement))
+    (when (< (current-indentation)
+             indent)
+      (goto-char start))))
+
+(defun elpy-nav-forward-indent ()
+  "Move forward to the next indent level, or over the next word."
+  (interactive)
+  (if (< (current-column) (current-indentation))
+      (let* ((current (current-column))
+             (next (* (1+ (/ current python-indent-offset))
+                      python-indent-offset)))
+        (goto-char (+ (point-at-bol)
+                      next)))
+    (let ((eol (point-at-eol)))
+      (forward-word)
+      (when (> (point) eol)
+        (goto-char (point-at-bol))))))
+
+(defun elpy-nav-backward-indent ()
+  "Move backward to the previous indent level, or over the previous word."
+  (interactive)
+  (if (and (<= (current-column) (current-indentation))
+           (/= (current-column) 0))
+      (let* ((current (current-column))
+             (next (* (1- (/ current python-indent-offset))
+                      python-indent-offset)))
+        (goto-char (+ (point-at-bol)
+                      next)))
+    (backward-word)))
+
 (defun elpy-nav--iblock (direction skip)
   "Move point forward, skipping lines indented more than the current one.
 
@@ -1392,60 +1572,6 @@ to skip lines with smaller indentation."
                              (current-indentation)
                              start-indentation)))
       (python-nav-forward-statement direction))))
-
-
-(defun elpy-nav-next-iblock (&optional direction)
-  "Move forward to the beginning of the next indentation block.
-
-An indentation block is a block indented further than the current
-one."
-  (interactive)
-  (let ((start-indentation (current-indentation))
-        (new-pos (point)))
-    (unwind-protect
-        (progn
-          (elpy-nav--iblock direction #'>)
-          (when (= (current-indentation)
-                   start-indentation)
-            (back-to-indentation)
-            (setq new-pos (point))))
-      (goto-char new-pos))))
-
-(defun elpy-nav-previous-iblock ()
-  "Move forward to the beginning of the previous indentation block.
-
-An indentation block is a block indented further than the current
-one."
-  (interactive)
-  (elpy-nav-next-iblock -1))
-
-(defun elpy-nav-backward-iblock ()
-  "Move back to the previous line less indented than the current one."
-  (interactive)
-  (let ((start-indentation (current-indentation))
-        (new-pos (point)))
-    (unwind-protect
-        (progn
-          (elpy-nav--iblock -1 #'>=)
-          (when (< (current-indentation)
-                   start-indentation)
-            (back-to-indentation)
-            (setq new-pos (point))))
-      (goto-char new-pos))))
-
-(defun elpy-nav-forward-iblock ()
-  "Move forward to the next line indented more than the current one."
-  (interactive)
-  (let ((start-indentation (current-indentation))
-        (new-pos (point)))
-    (unwind-protect
-        (progn
-          (elpy-nav--iblock 1 #'<=)
-          (when (> (current-indentation)
-                   start-indentation)
-            (back-to-indentation)
-            (setq new-pos (point))))
-      (goto-char new-pos))))
 
 (defun elpy-nav-move-iblock-down (&optional beg end)
   "Move the current indentation block below the next one.
@@ -1956,7 +2082,9 @@ name."
              (this-name (cdr (assq 'name usage)))
              (offset (cdr (assq 'offset usage))))
         (setq name this-name)
-        (with-current-buffer (find-file-noselect filename)
+        (with-current-buffer (if filename
+                                 (find-file-noselect filename)
+                               (current-buffer))
           (elpy-multiedit-add-overlay (+ offset 1)
                                       (+ offset 1 (length this-name)))
           (save-excursion
@@ -2155,6 +2283,9 @@ Used to associate responses to callbacks.")
 This maps call IDs to functions.")
 (make-variable-buffer-local 'elpy-rpc--backend-callbacks)
 
+(defvar elpy-rpc--last-error-popup nil
+  "The last time an error popup happened.")
+
 (defun elpy-rpc (method params &optional success error)
   "Call METHOD with PARAMS in the backend.
 
@@ -2257,15 +2388,16 @@ died, this will kill the process and buffer."
 (defun elpy-rpc--find-buffer (library-root python-command)
   "Return an existing RPC buffer for this project root and command."
   (catch 'return
-    (dolist (buf (buffer-list))
-      (when (and (elpy-rpc--process-buffer-p buf)
-                 (equal (buffer-local-value 'elpy-rpc--backend-library-root
-                                            buf)
-                        library-root)
-                 (equal (buffer-local-value 'elpy-rpc--backend-python-command
-                                            buf)
-                        python-command))
-        (throw 'return buf)))
+    (let ((full-python-command (executable-find python-command)))
+      (dolist (buf (buffer-list))
+        (when (and (elpy-rpc--process-buffer-p buf)
+                   (equal (buffer-local-value 'elpy-rpc--backend-library-root
+                                              buf)
+                          library-root)
+                   (equal (buffer-local-value 'elpy-rpc--backend-python-command
+                                              buf)
+                          full-python-command))
+          (throw 'return buf))))
     nil))
 
 (defun elpy-rpc--open (library-root python-command)
@@ -2274,23 +2406,24 @@ died, this will kill the process and buffer."
   (when (and elpy-rpc-backend
              (not (stringp elpy-rpc-backend)))
     (error "`elpy-rpc-backend' should be nil or a string."))
-  (let* ((name (format "*elpy-rpc [project:%s python:%s]*"
+  (let* ((full-python-command (executable-find python-command))
+         (name (format " *elpy-rpc [project:%s python:%s]*"
                        library-root
-                       python-command))
+                       full-python-command))
          (new-elpy-rpc-buffer (generate-new-buffer name))
          (proc nil))
     (with-current-buffer new-elpy-rpc-buffer
       (setq elpy-rpc--buffer-p t
             elpy-rpc--buffer (current-buffer)
             elpy-rpc--backend-library-root library-root
-            elpy-rpc--backend-python-command python-command
+            elpy-rpc--backend-python-command full-python-command
             default-directory "/"
             proc (condition-case err
                      (let ((process-connection-type nil)
                            (process-environment (elpy-rpc--environment)))
                        (start-process name
                                       (current-buffer)
-                                      python-command
+                                      full-python-command
                                       "-W" "ignore"
                                       "-m" "elpy.__main__"))
                    (error
@@ -2427,6 +2560,13 @@ This is usually an error or backtrace."
         (message "Elpy warning: %s" message))
        ((< code 500)
         (error "Elpy error: %s" message))
+       ((and elpy-rpc-error-timeout
+             elpy-rpc--last-error-popup
+             (<= (float-time)
+                 (+ elpy-rpc--last-error-popup
+                    elpy-rpc-error-timeout)))
+        (message "Elpy error popup ignored, see `elpy-rpc-error-timeout': %s"
+                 message))
        (t
         (let ((config (elpy-config--get-config)))
           (elpy-insert--popup "*Elpy Error*"
@@ -2466,8 +2606,7 @@ This is usually an error or backtrace."
                 (insert "\n"
                         "```\n"
                         "\n"
-                        "Reproduction:"
-                        "\n"
+                        "Reproduction:\n"
                         "\n")
                 (let ((method (cdr (assq 'method jedi-info)))
                       (source (cdr (assq 'source jedi-info)))
@@ -2481,21 +2620,54 @@ This is usually an error or backtrace."
                           "\n"
                           "script = jedi.Script(" script-args ")\n"
                           "script." method "()\n"))))
+            (let ((rope-info (cdr (assq 'rope_debug_info data))))
+              (when rope-info
+                (insert "\n")
+                (elpy-insert--header "Rope Debug Information")
+                (insert "```\n"
+                        "\n"
+                        "Reproduction:\n"
+                        "\n")
+                (let ((project-root (cdr (assq 'project_root rope-info)))
+                      (filename (cdr (assq 'filename rope-info)))
+                      (source (cdr (assq 'source rope-info)))
+                      (function-name (cdr (assq 'function_name rope-info)))
+                      (function-args (cdr (assq 'function_args rope-info))))
+                  (insert "```Python\n")
+                  (insert "\n"
+                          "source = '''\n"
+                          source
+                          "'''\n"
+                          "\n")
+                  (insert "project = rope.base.project.Project(\n"
+                          (format "    %S,\n" project-root)
+                          "    ropefolder=None\n"
+                          ")\n")
+                  (insert "resource = rope.base.libutils.path_to_resource(\n"
+                          "    project,\n"
+                          (format "    %S,\n" filename)
+                          "    'file'\n"
+                          ")\n")
+                  (insert (format "%s(\n    %s\n)\n"
+                                  function-name function-args)))))
             (when (not (= 0 (current-column)))
               (insert "\n"))
-            (insert "```"))))))))
+            (insert "```"))
+          (setq elpy-rpc--last-error-popup (float-time))))))))
 
 (defun elpy-rpc--environment ()
   "Return a `process-environment' for the RPC process.
 
 This includes `elpy-rpc-pythonpath' in the PYTHONPATH, if set."
   (if (or (not elpy-rpc-pythonpath)
-          (not (file-exists-p (format "%s/elpy/__init__.py"
-                                      elpy-rpc-pythonpath))))
+          (not (file-exists-p (expand-file-name "elpy/__init__.py"
+                                                elpy-rpc-pythonpath))))
       process-environment
     (let* ((old-pythonpath (getenv "PYTHONPATH"))
            (new-pythonpath (if old-pythonpath
-                               (concat elpy-rpc-pythonpath ":" old-pythonpath)
+                               (concat elpy-rpc-pythonpath
+                                       path-separator
+                                       old-pythonpath)
                              elpy-rpc-pythonpath)))
       (cons (concat "PYTHONPATH=" new-pythonpath)
             process-environment))))
@@ -2785,19 +2957,17 @@ here, and return the \"name\" as used by the backend."
                    (elpy-company--cache-completions arg result))
                   ;; Nothing from the backend, try dabbrev-code.
                   ((> (length arg) company-minimum-prefix-length)
-                   (company-dabbrev-code 'candidates arg))
+                   (elpy--sort-and-strip-duplicates
+                    (company-dabbrev-code 'candidates arg)))
                   ;; Well, ok, let's go meh.
                   (t
                    nil))))))))
     ;; sorted => t if the list is already sorted
-    ;; - We could sort it ourselves according to "how likely it is".
-    ;;   Does a backend do that?
+    (`sorted
+     t)
     ;; duplicates => t if there could be duplicates
     (`duplicates
-     ;; While elpy backends won't return duplicates, we are passing
-     ;; this on to `company-dabbrev-code' if we have no completions of
-     ;; our own, so return t just in case.
-     t)
+     nil)
     ;; no-cache <prefix> => t if company shouldn't cache results
     ;; meta <candidate> => short docstring for minibuffer
     (`meta
@@ -2831,6 +3001,21 @@ here, and return the \"name\" as used by the backend."
     ;; post-completion <candidate> => after insertion, for snippets
     ))
 
+(defun elpy--sort-and-strip-duplicates (seq)
+  "Sort SEQ and remove any duplicates."
+  (when seq
+    (let* ((seq (sort seq (lambda (a b)
+                            (not (string< a b)))))
+           (last (car seq))
+           (res (list (car seq))))
+      (setq seq (cdr seq))
+      (while seq
+        (when (not (equal last (car seq)))
+          (setq res (cons (car seq) res)
+                last (car seq)))
+        (setq seq (cdr seq)))
+      res)))
+
 ;;;;;;;;;;;;;;;;;
 ;;; Module: ElDoc
 
@@ -2849,32 +3034,41 @@ here, and return the \"name\" as used by the backend."
      (kill-local-variable 'eldoc-documentation-function))))
 
 (defun elpy-eldoc-documentation ()
-  "Return a call tip for the python call at point."
-  (elpy-rpc-get-calltip
-   (lambda (calltip)
-     (eldoc-message
-      (cond
-       ((not calltip)
-        (let ((current-defun (python-info-current-defun)))
-          (when current-defun
-            (format "In: %s()" current-defun))))
-       ((stringp calltip)
-        calltip)
-       (t
-        (let ((name (cdr (assq 'name calltip)))
-              (index (cdr (assq 'index calltip)))
-              (params (cdr (assq 'params calltip))))
-          (when index
-            (setf (nth index params)
-                  (propertize (nth index params)
-                              'face
-                              'eldoc-highlight-function-argument)))
-          (format "%s(%s)"
-                  name
-                  (mapconcat #'identity params ", "))
-          ))))))
-  ;; Return the last message until we're done
-  eldoc-last-message)
+  "Return some interesting information for the code at point.
+
+This will return flymake errors for the line at point if there
+are any. If not, this will do an asynchronous call to the RPC
+backend to get a call tip, and display that using
+`eldoc-message'. If the backend has no call tip, this will
+display the current class and method instead."
+  (let ((flymake-error (elpy-flymake-error-at-point)))
+    (if flymake-error
+        flymake-error
+      (elpy-rpc-get-calltip
+       (lambda (calltip)
+         (eldoc-message
+          (cond
+           ((not calltip)
+            (let ((current-defun (python-info-current-defun)))
+              (when current-defun
+                (format "In: %s()" current-defun))))
+           ((stringp calltip)
+            calltip)
+           (t
+            (let ((name (cdr (assq 'name calltip)))
+                  (index (cdr (assq 'index calltip)))
+                  (params (cdr (assq 'params calltip))))
+              (when index
+                (setf (nth index params)
+                      (propertize (nth index params)
+                                  'face
+                                  'eldoc-highlight-function-argument)))
+              (format "%s(%s)"
+                      name
+                      (mapconcat #'identity params ", "))
+              ))))))
+      ;; Return the last message until we're done
+      eldoc-last-message)))
 
 ;;;;;;;;;;;;;;;;;;;
 ;;; Module: Flymake
@@ -2952,13 +3146,18 @@ description."
 
 (defun elpy-flymake-show-error ()
   "Show the flymake error message at point."
+  (interactive)
+  (message "%s" (elpy-flymake-error-at-point)))
+
+(defun elpy-flymake-error-at-point ()
+  "Return the flymake error at point, or nil if there is none."
   (let* ((lineno (line-number-at-pos))
          (err-info (car (flymake-find-err-info flymake-err-info
-                                               lineno)))
-         (text (mapconcat #'flymake-ler-text
-                          err-info
-                          ", ")))
-    (message "%s" text)))
+                                               lineno))))
+    (when err-info
+      (mapconcat #'flymake-ler-text
+                 err-info
+                 ", "))))
 
 (defun elpy-flymake--standard-value (var)
   "Return the standard value of the given variable."
