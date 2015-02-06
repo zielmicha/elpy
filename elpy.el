@@ -4,9 +4,9 @@
 
 ;; Author: Jorgen Schaefer <contact@jorgenschaefer.de>
 ;; URL: https://github.com/jorgenschaefer/elpy
-;; Version: 1.6.0
+;; Version: 1.7.0
 ;; Keywords: Python, IDE, Languages, Tools
-;; Package-Requires: ((company "0.8.2") (find-file-in-project "3.3")  (highlight-indentation "0.5.0") (idomenu "0.1") (pyvenv "1.3") (yasnippet "0.8.0"))
+;; Package-Requires: ((company "0.8.2") (find-file-in-project "3.3")  (highlight-indentation "0.5.0") (pyvenv "1.3") (yasnippet "0.8.0"))
 
 ;; This program is free software; you can redistribute it and/or
 ;; modify it under the terms of the GNU General Public License
@@ -80,7 +80,7 @@
 (require 'elpy-refactor)
 (require 'pyvenv)
 
-(defconst elpy-version "1.6.0"
+(defconst elpy-version "1.7.0"
   "The version of the Elpy lisp code.")
 
 ;;;;;;;;;;;;;;;;;;;;;;
@@ -285,13 +285,49 @@ message again within this amount of seconds."
   :type 'integer
   :group 'elpy)
 
+(defcustom elpy-eldoc-show-current-function t
+  "If true, show the current function if no calltip is available.
+
+When Elpy can not find the calltip of the function call at point,
+it can show the name of the function or class and method being
+edited instead. Setting this variable to nil disables this feature."
+  :type 'boolean
+  :group 'elpy)
+
 (defcustom elpy-test-runner 'elpy-test-discover-runner
   "The test runner to use to run tests."
   :type '(choice (const :tag "Unittest Discover" elpy-test-discover-runner)
                  (const :tag "Django Discover" elpy-test-django-runner)
                  (const :tag "Nose" elpy-test-nose-runner)
-                 (const :tag "py.test" elpy-test-pytest-runner))
+                 (const :tag "py.test" elpy-test-pytest-runner)
+                 (const :tag "Twisted Trial" elpy-test-trial-runner))
   :safe 'elpy-test-runner-p
+  :group 'elpy)
+
+(defcustom elpy-test-discover-runner-command '("python" "-m" "unittest")
+  "The command to use for `elpy-test-discover-runner'."
+  :type '(repeat string)
+  :group 'elpy)
+
+(defcustom elpy-test-django-runner-command '("django-admin.py" "test"
+                                             "--noinput")
+  "The command to use for `elpy-test-django-runner'."
+  :type '(repeat string)
+  :group 'elpy)
+
+(defcustom elpy-test-nose-runner-command '("nosetests")
+  "The command to use for `elpy-test-django-runner'."
+  :type '(repeat string)
+  :group 'elpy)
+
+(defcustom elpy-test-trial-runner-command '("trial")
+  "The command to use for `elpy-test-django-runner'."
+  :type '(repeat string)
+  :group 'elpy)
+
+(defcustom elpy-test-pytest-runner-command '("py.test")
+  "The command to use for `elpy-test-django-runner'."
+  :type '(repeat string)
   :group 'elpy)
 
 ;;;;;;;;;;;;;
@@ -313,7 +349,8 @@ message again within this amount of seconds."
     (define-key map (kbd "C-c C-d") 'elpy-doc)
     (define-key map (kbd "C-c C-e") 'elpy-multiedit-python-symbol-at-point)
     (define-key map (kbd "C-c C-f") 'elpy-find-file)
-    (define-key map (kbd "C-c C-j") 'idomenu)
+    (define-key map (kbd "C-c RET") 'elpy-importmagic-add-import)
+    (define-key map (kbd "C-c <S-return>") 'elpy-importmagic-fixup)
     (define-key map (kbd "C-c C-n") 'elpy-flymake-next-error)
     (define-key map (kbd "C-c C-o") 'elpy-occur-definitions)
     (define-key map (kbd "C-c C-p") 'elpy-flymake-previous-error)
@@ -531,11 +568,21 @@ except:
 try:
     import rope
     config['rope_version'] = rope.VERSION
-    config['rope_latest'] = latest('rope', config['rope_version'])
+    if sys.version_info[0] <= 2:
+        config['rope_latest'] = latest('rope', config['rope_version'])
+    else:
+        config['rope_latest'] = latest('rope_py3k', config['rope_version'])
 except:
     config['rope_version'] = None
     config['rope_latest'] = latest('rope')
 
+try:
+    import importmagic
+    config['importmagic_version'] = importmagic.__version__
+    config['importmagic_latest'] = latest('importmagic', config['importmagic_version'])
+except:
+    config['importmagic_version'] = None
+    config['importmagic_latest'] = latest('importmagic')
 
 json.dump(config, sys.stdout)
 ")
@@ -641,7 +688,7 @@ item in another window.\n\n")
 
     ;; No virtual env
     (when (and (gethash "python_rpc_executable" config)
-               (not (gethash "virtual_env" (elpy-config--get-config))))
+               (not (gethash "virtual_env" config)))
       (elpy-insert--para
        "You have not activated a virtual env. While Elpy supports this, "
        "it is often a good idea to work inside a virtual env. You can use "
@@ -669,7 +716,7 @@ item in another window.\n\n")
       (elpy-insert--para
        "The Python interpreter could not find the elpy module. "
        "Make sure the module is installed"
-       (if (getenv "virtual_env" config)
+       (if (gethash "virtual_env" config)
            " in the current virtualenv.\n"
          ".\n"))
       (insert "\n")
@@ -750,6 +797,26 @@ item in another window.\n\n")
                      :package "jedi" :upgrade t)
       (insert "\n\n"))
 
+    ;; No importmagic available
+    (when (not (gethash "importmagic_version" config))
+      (elpy-insert--para
+       "The importmagic package is not available. Commands using this will "
+       "not work.\n")
+      (insert "\n")
+      (widget-create 'elpy-insert--pip-button
+                     :package "importmagic")
+      (insert "\n\n"))
+
+    ;; Newer version of importmagic available
+    (when (and (gethash "importmagic_version" config)
+               (gethash "importmagic_latest" config))
+      (elpy-insert--para
+       "There is a newer version of the importmagic package available.\n")
+      (insert "\n")
+      (widget-create 'elpy-insert--pip-button
+                     :package "importmagic" :upgrade t)
+      (insert "\n\n"))
+
     ;; flake8, the default syntax checker, not found
     (when (not (executable-find "flake8"))
       (elpy-insert--para
@@ -795,9 +862,10 @@ virtual_env_short"
                  (executable-find interactive-python)
                  config))
       (let ((venv (getenv "VIRTUAL_ENV")))
-        (when venv
-          (puthash "virtual_env" venv config)
-          (puthash "virtual_env_short" (file-name-nondirectory venv) config)))
+        (puthash "virtual_env" venv config)
+        (if venv
+            (puthash "virtual_env_short" (file-name-nondirectory venv) config)
+          (puthash "virtual_env_short" nil config)))
       (let ((return-value (ignore-errors
                             (let ((process-environment
                                    (elpy-rpc--environment))
@@ -835,6 +903,8 @@ virtual_env_short"
         (jedi-latest (gethash "jedi_latest" config))
         (rope-version (gethash "rope_version" config))
         (rope-latest (gethash "rope_latest" config))
+        (importmagic-version (gethash "importmagic_version" config))
+        (importmagic-latest (gethash "importmagic_latest" config))
         (virtual-env (gethash "virtual_env" config))
         (virtual-env-short (gethash "virtual_env_short" config))
         table maxwidth)
@@ -883,6 +953,9 @@ virtual_env_short"
             ("Rope" . ,(elpy-config--package-link "rope"
                                                   rope-version
                                                   rope-latest))
+            ("Importmagic" . ,(elpy-config--package-link "importmagic"
+                                                         importmagic-version
+                                                         importmagic-latest))
             ("Syntax checker" . ,(let ((syntax-checker
                                         (executable-find
                                          python-check-command)))
@@ -1363,7 +1436,7 @@ else:
           "';'.join(__COMPLETER_all_completions('''%s'''))\n"))
    ;; Emacs 24.4
    ((boundp 'python-shell-interpreter-interactive-arg)
-    (setq python-shell-interpreter "python"
+    (setq python-shell-interpreter cpython
           python-shell-interpreter-args "-i"))
    (t
     (error "I don't know how to set ipython settings for this Emacs"))))
@@ -1402,7 +1475,7 @@ code is executed."
 (defun elpy-shell-switch-to-shell ()
   "Switch to inferior Python process buffer."
   (interactive)
-  (pop-to-buffer (process-buffer (elpy-shell-get-or-create-process)) t))
+  (pop-to-buffer (process-buffer (elpy-shell-get-or-create-process))))
 
 (defun elpy-shell-get-or-create-process ()
   "Get or create an inferior Python process for current buffer and return it."
@@ -1841,8 +1914,10 @@ This requires Python 2.7 or later."
                (test (format "%s.%s" module test))
                (module module)
                (t "discover"))))
-    (elpy-test-run top
-                   "python" "-m" "unittest" test)))
+    (apply #'elpy-test-run
+           top
+           (append elpy-test-discover-runner-command
+                   (list test)))))
 (put 'elpy-test-discover-runner 'elpy-test-runner-p t)
 
 (defun elpy-test-django-runner (top file module test)
@@ -1851,13 +1926,15 @@ This requires Python 2.7 or later."
 This requires Django 1.6 or the django-discover-runner package."
   (interactive (elpy-test-at-point))
   (if module
-      (elpy-test-run top
-                     "django-admin.py" "test" "--noinput"
-                     (if test
-                         (format "%s.%s" module test)
-                       module))
-    (elpy-test-run top
-                   "django-admin.py" "test" "--noinput")))
+      (apply #'elpy-test-run
+             top
+             (append elpy-test-django-runner-command
+                     (list (if test
+                               (format "%s.%s" module test)
+                             module))))
+    (apply #'elpy-test-run
+           top
+           elpy-test-django-runner-command)))
 (put 'elpy-test-django-runner 'elpy-test-runner-p t)
 
 (defun elpy-test-nose-runner (top file module test)
@@ -1866,13 +1943,31 @@ This requires Django 1.6 or the django-discover-runner package."
 This requires the nose package to be installed."
   (interactive (elpy-test-at-point))
   (if module
-      (elpy-test-run top
-                     "nosetests" (if test
-                                     (format "%s:%s" module test)
-                                   module))
-    (elpy-test-run top
-                   "nosetests")))
+      (apply #'elpy-test-run
+             top
+             (append elpy-test-nose-runner-command
+                     (list (if test
+                               (format "%s:%s" module test)
+                             module))))
+    (apply #'elpy-test-run
+           top
+           elpy-test-nose-runner-command)))
 (put 'elpy-test-nose-runner 'elpy-test-runner-p t)
+
+(defun elpy-test-trial-runner (top file module test)
+  "Test the project using Twisted's Trial test runner.
+
+This requires the twisted-core package to be installed."
+  (interactive (elpy-test-at-point))
+  (if module
+      (apply #'elpy-test-run
+             top
+             (append elpy-test-trial-runner-command
+                     (list (if test
+                               (format "%s.%s" module test)
+                             module))))
+    (apply #'elpy-test-run top elpy-test-trial-runner-command)))
+(put 'elpy-test-trial-runner 'elpy-test-runner-p t)
 
 (defun elpy-test-pytest-runner (top file module test)
   "Test the project using the py.test test runner.
@@ -1882,16 +1977,17 @@ This requires the pytest package to be installed."
   (cond
    (test
     (let ((test-list (split-string test "\\.")))
-      (elpy-test-run top
-                     "py.test" (mapconcat #'identity
-                                          (cons file test-list)
-                                          "::"))))
+      (apply #'elpy-test-run
+             top
+             (append elpy-test-pytest-runner-command
+                     (list (mapconcat #'identity
+                                      (cons file test-list)
+                                      "::"))))))
    (module
-    (elpy-test-run top
-                   "py.test" file))
+    (apply #'elpy-test-run top (append elpy-test-pytest-runner-command
+                                       (list file))))
    (t
-    (elpy-test-run top
-                   "py.test"))))
+    (apply #'elpy-test-run top elpy-test-pytest-runner-command))))
 (put 'elpy-test-pytest-runner 'elpy-test-runner-p t)
 
 ;;;;;;;;;;;;;;;;;
@@ -1957,6 +2053,78 @@ prefix argument is given, prompt for a symbol from the user."
         nil))))
 
 ;;;;;;;;;;;;;;
+;;; Import manipulation
+
+(defun elpy-importmagic--replace-block (spec)
+  "Replace an imports block. SPEC is (startline endline newblock)."
+  (let ((start-line (nth 0 spec))
+        (end-line (nth 1 spec))
+        (new-block (nth 2 spec)))
+    (save-excursion
+      (save-restriction
+        (widen)
+        (goto-char (point-min))
+        (forward-line start-line)
+        (let ((beg (point))
+              (end (progn (forward-line (- end-line start-line)) (point))))
+          ;; Avoid deleting and re-inserting when the blocks are equal.
+          (unless (string-equal (buffer-substring beg end) new-block)
+            (delete-region beg end)
+            (insert new-block)))))))
+
+(defun elpy-importmagic--add-import-read-args (&optional object prompt)
+  (let* ((default-object (save-excursion
+                           (let ((bounds (with-syntax-table python-dotty-syntax-table
+                                           (bounds-of-thing-at-point 'symbol))))
+                             (if bounds (buffer-substring (car bounds) (cdr bounds)) ""))))
+         (object-to-import (or object (read-string "Object to import: " default-object)))
+         (possible-imports (elpy-rpc "get_import_symbols" (list buffer-file-name
+                                                                (elpy-rpc--buffer-contents)
+                                                                object-to-import)))
+         (statement-prompt (or prompt "New import statement: ")))
+    (cond
+     ;; An elpy warning (i.e. index not ready) is returned as a string.
+     ((stringp possible-imports)
+      (list ""))
+     ;; If there is no candidate, we exit immediately.
+     ((null possible-imports)
+      (message "No import candidate found")
+      (list ""))
+     ;; We have some candidates, let the user choose one.
+     (t
+      (let ((first-choice (car possible-imports))
+            (user-choice (completing-read statement-prompt possible-imports)))
+        (list (if (equal user-choice "") first-choice user-choice)))))))
+
+(defun elpy-importmagic-add-import (statement)
+  (interactive (elpy-importmagic--add-import-read-args))
+  (unless (equal statement "")
+    (let* ((res (elpy-rpc "add_import" (list buffer-file-name
+                                             (elpy-rpc--buffer-contents)
+                                             statement))))
+      (elpy-importmagic--replace-block res))))
+
+(defun elpy-importmagic-fixup ()
+  "Query for new imports of unresolved symbols, and remove unreferenced imports.
+
+Also sort the imports in the import statement blocks."
+  (interactive)
+  ;; get all unresolved names, and interactively add imports for them
+  (let* ((res (elpy-rpc "get_unresolved_symbols" (list buffer-file-name
+                                                       (elpy-rpc--buffer-contents)))))
+    (unless (stringp res)
+      (if (null res) (message "No imports to add."))
+      (dolist (object res)
+        (let* ((prompt (format "How to import \"%s\": " object))
+               (choice (elpy-importmagic--add-import-read-args object prompt)))
+          (elpy-importmagic-add-import (car choice))))))
+  ;; now get a new import statement block (this also sorts)
+  (let* ((res (elpy-rpc "remove_unreferenced_imports" (list buffer-file-name
+                                                            (elpy-rpc--buffer-contents)))))
+    (unless (stringp res)
+      (elpy-importmagic--replace-block res))))
+
+;;;;;;;;;;;;;;
 ;;; Multi-Edit
 
 (defvar elpy-multiedit-overlays nil
@@ -1999,7 +2167,8 @@ overlays, too."
 
 This updates all other overlays."
   (when (and after-change
-             (not undo-in-progress))
+             (not undo-in-progress)
+             (overlay-buffer ov))
     (let ((text (buffer-substring (overlay-start ov)
                                   (overlay-end ov)))
           (inhibit-modification-hooks t))
@@ -3003,18 +3172,9 @@ here, and return the \"name\" as used by the backend."
 
 (defun elpy--sort-and-strip-duplicates (seq)
   "Sort SEQ and remove any duplicates."
-  (when seq
-    (let* ((seq (sort seq (lambda (a b)
-                            (not (string< a b)))))
-           (last (car seq))
-           (res (list (car seq))))
-      (setq seq (cdr seq))
-      (while seq
-        (when (not (equal last (car seq)))
-          (setq res (cons (car seq) res)
-                last (car seq)))
-        (setq seq (cdr seq)))
-      res)))
+  (sort (delete-dups seq)
+        (lambda (a b)
+          (string< a b))))
 
 ;;;;;;;;;;;;;;;;;
 ;;; Module: ElDoc
@@ -3049,9 +3209,10 @@ display the current class and method instead."
          (eldoc-message
           (cond
            ((not calltip)
-            (let ((current-defun (python-info-current-defun)))
-              (when current-defun
-                (format "In: %s()" current-defun))))
+            (when elpy-eldoc-show-current-function
+              (let ((current-defun (python-info-current-defun)))
+                (when current-defun
+                  (format "In: %s()" current-defun)))))
            ((stringp calltip)
             calltip)
            (t
@@ -3151,13 +3312,14 @@ description."
 
 (defun elpy-flymake-error-at-point ()
   "Return the flymake error at point, or nil if there is none."
-  (let* ((lineno (line-number-at-pos))
-         (err-info (car (flymake-find-err-info flymake-err-info
-                                               lineno))))
-    (when err-info
-      (mapconcat #'flymake-ler-text
-                 err-info
-                 ", "))))
+  (when (boundp 'flymake-err-info)
+    (let* ((lineno (line-number-at-pos))
+           (err-info (car (flymake-find-err-info flymake-err-info
+                                                 lineno))))
+      (when err-info
+        (mapconcat #'flymake-ler-text
+                   err-info
+                   ", ")))))
 
 (defun elpy-flymake--standard-value (var)
   "Return the standard value of the given variable."

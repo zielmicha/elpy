@@ -3,7 +3,8 @@
 (require 'f)
 (let ((elpy-dir (f-parent (f-dirname (f-this-file)))))
   (add-to-list 'load-path elpy-dir)
-  (add-to-list 'process-environment (format "PYTHONPATH=%s" elpy-dir)))
+  (add-to-list 'process-environment (format "PYTHONPATH=%s" elpy-dir))
+  (add-to-list 'process-environment "ELPY_TEST=1"))
 (require 'elpy)
 ;; Travis regularly has some lag for some reason.
 (setq elpy-rpc-timeout 10)
@@ -167,3 +168,6 @@ for that file."
   `(buffer-contents-differ ,(apply #'source-string lines)
                            ,(buffer-string-with-point)))
 (put 'buffer-be 'ert-explainer 'buffer-be-explainer)
+
+(setq yas-verbosity 0)
+(setq yas-snippet-dirs ())
