@@ -4,7 +4,7 @@
 
 ;; Author: Jorgen Schaefer <contact@jorgenschaefer.de>
 ;; URL: https://github.com/jorgenschaefer/elpy
-;; Version: 1.7.0
+;; Version: 1.7.1
 ;; Keywords: Python, IDE, Languages, Tools
 ;; Package-Requires: ((company "0.8.2") (find-file-in-project "3.3")  (highlight-indentation "0.5.0") (pyvenv "1.3") (yasnippet "0.8.0"))
 
@@ -80,7 +80,7 @@
 (require 'elpy-refactor)
 (require 'pyvenv)
 
-(defconst elpy-version "1.7.0"
+(defconst elpy-version "1.7.1"
   "The version of the Elpy lisp code.")
 
 ;;;;;;;;;;;;;;;;;;;;;;
@@ -1386,7 +1386,7 @@ With prefix arg, prompt for the command to use."
           "';'.join(get_ipython().Completer.all_completions('''%s'''))\n"))
    ;; Emacs 24.4
    ((boundp 'python-shell-interpreter-interactive-arg)
-    (setq python-shell-interpreter "ipython"
+    (setq python-shell-interpreter ipython
           python-shell-interpreter-args "-i"))
    (t
     (error "I don't know how to set ipython settings for this Emacs"))))
@@ -2635,35 +2635,42 @@ RPC calls with the event."
   (let ((buffer (process-buffer process)))
     (when (and buffer
                (buffer-live-p buffer))
-      (with-current-buffer (process-buffer process)
+      (with-current-buffer buffer
         (goto-char (point-max))
         (insert output)
-        (catch 'return
-          (while (progn
-                   (goto-char (point-min))
-                   (search-forward "\n" nil t))
-            (goto-char (point-min))
-            (let (json did-read-json)
-              (condition-case err
-                  (setq json (let ((json-array-type 'list))
-                               (json-read))
-                        did-read-json t)
-                (error
+        (while (progn
                  (goto-char (point-min))
-                 (cond
-                  ((looking-at "elpy-rpc ready\n")
-                   (replace-match "")
-                   (elpy-rpc--check-backend-version "1.1"))
-                  ((looking-at "elpy-rpc ready (\\([^ ]*\\))\n")
-                   (let ((rpc-version (match-string 1)))
-                     (replace-match "")
-                     (elpy-rpc--check-backend-version rpc-version)))
-                  (t
-                   (elpy-rpc--handle-unexpected-line)
-                   (throw 'return nil)))))
-              (when did-read-json
-                (delete-region (point-min) (1+ (point)))
-                (elpy-rpc--handle-json json)))))))))
+                 (search-forward "\n" nil t))
+          (let ((line-end (point))
+                (json nil)
+                (did-read-json nil))
+            (goto-char (point-min))
+            (condition-case err
+                (setq json (let ((json-array-type 'list))
+                             (json-read))
+                      line-end (1+ (point))
+                      did-read-json t)
+              (error
+               (goto-char (point-min))))
+            (cond
+             (did-read-json
+              (delete-region (point-min) line-end)
+              (elpy-rpc--handle-json json))
+             ((looking-at "elpy-rpc ready\n")
+              (replace-match "")
+              (elpy-rpc--check-backend-version "1.1"))
+             ((looking-at "elpy-rpc ready (\\([^ ]*\\))\n")
+              (let ((rpc-version (match-string 1)))
+                (replace-match "")
+                (elpy-rpc--check-backend-version rpc-version)))
+             ((looking-at ".*No module named elpy\n")
+              (replace-match "")
+              (elpy-config-error "Elpy module not found"))
+             (t
+              (let ((line (buffer-substring (point-min)
+                                            line-end)))
+                (delete-region (point-min) line-end)
+                (elpy-rpc--handle-unexpected-line line))))))))))
 
 (defun elpy-rpc--check-backend-version (rpc-version)
   "Check that we are using the right version."
@@ -2679,26 +2686,24 @@ RPC calls with the event."
        "Elpy Emacs Lisp version: " elpy-version "\n"
        "Elpy Python version....: " rpc-version "\n"))))
 
-(defun elpy-rpc--handle-unexpected-line ()
+(defun elpy-rpc--handle-unexpected-line (line)
   "Handle an unexpected line from the backend.
 
 This is usually an error or backtrace."
-  (goto-char (point-min))
-  (let ((missing-module (when (re-search-forward "No module named \\(.*\\)"
-                                                 nil t)
-                          (match-string 1))))
-    (if (equal missing-module "elpy")
-        (elpy-config-error "Elpy module not found")
-      (let ((data (buffer-string)))
-        (elpy-insert--popup "*Elpy Error*"
-          (elpy-insert--header "Error initializing Elpy")
-          (elpy-insert--para
-           "There was an error when trying to start the backend. "
-           "Elpy can not work until this problem is solved. "
-           "The following lines were received from Python, and might "
-           "help identifying the problem.\n")
-          (insert "\n"
-                  data))))))
+  (let ((buf (get-buffer "*Elpy Output*")))
+    (when (not buf)
+      (elpy-insert--popup "*Elpy Output*"
+        (elpy-insert--header "Output from Backend")
+        (elpy-insert--para
+         "There was some unexpected output from the Elpy backend. "
+         "This is usually some module that does not use correct logging, "
+         "but might indicate a configuration problem.\n\n")
+        (elpy-insert--header "Output")
+        (setq buf (current-buffer))))
+    (with-current-buffer buf
+      (goto-char (point-max))
+      (let ((inhibit-read-only t))
+        (insert line)))))
 
 (defun elpy-rpc--handle-json (json)
   "Handle a single JSON object from the RPC backend."
@@ -3005,8 +3010,10 @@ time. Honestly."
    ((eq mode-name 'eldoc-minor-mode)
     (setq eldoc-minor-mode-string nil))
    (t
-    (setcdr (assq mode-name minor-mode-alist)
-            (list "")))))
+    (let ((cell (assq mode-name minor-mode-alist)))
+      (when cell
+        (setcdr cell
+                (list "")))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Module: Sane Defaults
