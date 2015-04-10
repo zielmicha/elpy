@@ -329,8 +329,8 @@ edited instead. Setting this variable to nil disables this feature."
     (define-key map (kbd "<S-return>") 'elpy-open-and-indent-line-below)
     (define-key map (kbd "<C-S-return>") 'elpy-open-and-indent-line-above)
 
-    (define-key map (kbd "<C-down>") 'elpy-nav-forward-block)
-    (define-key map (kbd "<C-up>") 'elpy-nav-backward-block)
+    ;(define-key map (kbd "<C-down>") 'elpy-nav-forward-block)
+    ;(define-key map (kbd "<C-up>") 'elpy-nav-backward-block)
     (define-key map (kbd "<C-left>") 'elpy-nav-backward-indent)
     (define-key map (kbd "<C-right>") 'elpy-nav-forward-indent)
 
