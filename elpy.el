@@ -165,8 +165,8 @@ These are prepended to `grep-find-ignored-directories'."
     (define-key map (kbd "C-c C-w") 'elpy-doc-websearch)
     ;; (define-key map (kbd "C-c C-z") 'python-shell-switch-to-shell)
 
-    (define-key map (kbd "<C-down>") 'elpy-nav-forward-definition)
-    (define-key map (kbd "<C-up>")  'elpy-nav-backward-definition)
+    ;(define-key map (kbd "<C-down>") 'elpy-nav-forward-definition)
+    ;(define-key map (kbd "<C-up>")  'elpy-nav-backward-definition)
     ;; (define-key map (kbd "M-,")     'iedit-mode
     (define-key map (kbd "M-.")     'elpy-goto-definition)
     (define-key map (kbd "M-a")     'elpy-nav-backward-statement)
